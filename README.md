@@ -2,7 +2,7 @@
 
 How often do extreme nitric oxide (NO) levels occur in Californian cities, are they becoming less frequent, and does one definition of "extreme" work for every city? This project applies peaks-over-threshold extreme-value modelling to 1,200 monthly maximum NO readings from ten monitoring sites in nine cities, 2007–2016.
 
-**Group project** (four students), Environmental Statistics, University of Glasgow, 2026. The section below says which parts are mine.
+**Group project** (four students), University of Glasgow, 2026. The section below says which parts are mine.
 
 ![Monthly exceedances of the global threshold by city](figures/Fig7_City_Monthly_Exceedances.png)
 
