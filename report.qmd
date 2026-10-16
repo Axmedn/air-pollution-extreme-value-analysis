@@ -1,0 +1,577 @@
+---
+title: "Extreme Nitric Oxide Pollution in California, 2007–2016"
+subtitle: "An extreme value analysis of monthly concentrations at ten monitoring sites"
+author: "Ahmed Mohamed"
+date: "October 2026"
+date-format: "MMMM YYYY"
+format:
+  gfm:
+    number-sections: true
+  pdf:
+    pdf-engine: xelatex
+    papersize: a4
+    fontsize: 11pt
+    geometry: "margin=2.2cm"
+    fig-pos: "htbp"
+    colorlinks: true
+execute:
+  echo: false
+  warning: false
+  message: false
+fig-width: 7
+fig-height: 3.8
+fig-dpi: 200
+number-sections: true
+---
+
+```{r}
+#| label: setup
+suppressPackageStartupMessages({
+  library(dplyr); library(tidyr); library(ggplot2)
+  library(patchwork); library(extRemes); library(mice)
+})
+set.seed(2026)
+
+f2 <- function(x) formatC(x, format = "f", digits = 2)
+f3 <- function(x) formatC(x, format = "f", digits = 3)
+f1 <- function(x) formatC(x, format = "f", digits = 1)
+pv <- function(p) if (p < 0.001) "< 0.001" else paste("=", f3(p))
+ci_txt <- function(lo, hi, f = f3) paste0("(", f(lo), ", ", f(hi), ")")
+# booktabs tables in the PDF, pipe tables on GitHub
+tab <- function(d, align) {
+  if (knitr::is_latex_output()) {
+    d[] <- lapply(d, function(x) gsub("%", "\\\\%", x))
+    names(d) <- gsub("%", "\\\\%", names(d))
+    knitr::kable(d, format = "latex", booktabs = TRUE, align = align,
+                 escape = FALSE, linesep = "")
+  } else knitr::kable(d, align = align)
+}
+
+main3 <- c("Rubidoux", "San Francisco", "Roseville")
+pal3  <- c("Rubidoux" = "#B5472E", "San Francisco" = "#2C6E9E", "Roseville" = "#3A9A8A")
+
+theme_set(theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold", size = 10),
+        strip.text = element_text(face = "bold")))
+
+raw <- read.csv("data/california_no_monthly.csv")
+df <- raw |>
+  rename(NO = Nitric.oxide..NO., wind = Wind.Speed...Resultant,
+         temp = Outdoor.Temperature, pres = Barometric.pressure) |>
+  filter(year >= 2007, year <= 2016) |>
+  mutate(t  = year + (month - 0.5) / 12 - 2011,
+         s1 = sin(2 * pi * month / 12),
+         c1 = cos(2 * pi * month / 12))
+
+obs <- df |> filter(!is.na(NO))
+u   <- unname(quantile(obs$NO, 0.85))
+obs <- obs |> mutate(exc = NO > u)
+
+# fevd needs a data frame without missing values in any column it is given
+gp_data <- function(d, ...) as.data.frame(select(d, NO, ...))
+```
+
+## Introduction
+
+Nitric oxide (NO) and nitrogen dioxide (NO~2~), together called NO~x~, are the main nitrogen oxides in polluted air. They convert rapidly into each other. NO~2~ is the more directly harmful and is regulated by the US Environmental Protection Agency through its National Ambient Air Quality Standards (EPA 2023). NO itself is not regulated, so there are no official baseline or extreme levels. Because NO is a precursor of NO~2~, its extremes still matter for exposure. Most NO comes from combustion, so it is highest in urban and industrial areas, and wildfires add occasional spikes (Perring et al. 2026).
+
+This report studies the *extremes* of NO: the rare months with very high concentrations, rather than typical levels. It asks four questions:
+
+1. **Definition.** What counts as an extreme NO month in these data, and what does the upper tail look like?
+2. **Time.** Did extreme months become less frequent, or less severe, between 2007 and 2016?
+3. **Weather and season.** Do temperature, wind speed, barometric pressure or the time of year change how severe extremes are?
+4. **Cities.** How do extremes differ between cities, both against one common threshold (a *global* definition of extreme) and against each city's own threshold (a *local* definition)?
+
+**Why extreme value theory.** Ordinary models, such as a regression on the mean, describe the bulk of the data and fit it best where most observations lie. Extremes are, by definition, scarce, and they sit in the tail where those models are least reliable. Extreme value theory (EVT) gives a model justified for the tail itself. The result used here (Pickands, Balkema and de Haan) says that, for a wide class of distributions, the amounts by which observations exceed a sufficiently high threshold $u$ approximately follow a generalised Pareto distribution (GPD), whatever the distribution of the bulk. The approach of modelling every value above $u$ is called peaks over threshold (POT). It uses more of the data than the alternative of keeping one maximum per year (block maxima), which matters with only ten years of records.
+
+**About this report.** This is an extended re-analysis of a group project for an environmental statistics course at the University of Glasgow (2026). My sections of the original report were the threshold selection, the city-level covariate models for Rubidoux and Roseville, the city-specific thresholds and the limitations. This version is my own work. It reworks the whole analysis in response to the marker's feedback, and corrects several claims in my original sections that the data do not support.
+
+## Data and exploratory analysis
+
+```{r}
+#| label: data-summary
+n_all  <- nrow(df)
+n_obs  <- nrow(obs)
+miss   <- df |> summarise(across(c(NO, temp, wind, pres), ~ sum(is.na(.))))
+no_sum <- obs |> summarise(min = min(NO), med = median(NO), mean = mean(NO), max = max(NO), sd = sd(NO))
+n2016  <- sum(!is.na(df$NO[df$year == 2016]))
+```
+
+The data contain one NO concentration (ppb) per site and month for ten monitoring sites in nine Californian cities (Lompoc has two sites), from January 2007 to December 2016: `r n_all` site-months in total. Monthly averages of wind speed, outdoor temperature and barometric pressure are also given. Their units are not documented, and their values do not follow the usual seasonal pattern for these places, so weather effects below are reported per unit of the variable as supplied. NO is observed in `r n_obs` site-months. Only `r n2016` of them fall in 2016, all in January to April, so the 2016 record is incomplete.
+
+NO is strongly right-skewed: the median is `r f1(no_sum$med)` ppb, the mean `r f1(no_sum$mean)` ppb and the maximum `r f1(no_sum$max)` ppb. @fig-cities shows that three cities, Rubidoux, San Francisco and Roseville, have far higher concentrations than the other six, and @fig-season shows a strong seasonal cycle, with high values from October to February.
+
+```{r}
+#| label: fig-cities
+#| fig-cap: "Monthly NO concentration by city, 2007–2016, on a log scale. The dashed line is the global threshold u defined below."
+#| fig-height: 3.2
+ord <- obs |> group_by(city) |> summarise(m = median(NO)) |> arrange(m) |> pull(city)
+ggplot(obs, aes(factor(city, levels = ord), NO + 1)) +
+  geom_boxplot(fill = "grey85", outlier.size = 0.6, linewidth = 0.3) +
+  geom_hline(yintercept = u + 1, linetype = "dashed", colour = "#B5472E") +
+  scale_y_log10() + coord_flip() +
+  labs(x = NULL, y = "NO + 1 (ppb, log scale)")
+```
+
+```{r}
+#| label: fig-season
+#| fig-cap: "Seasonal cycle. Monthly NO at the three cities where most extreme months occur (lines are monthly medians), and the share of all observed site-months above the global threshold u."
+#| fig-height: 3
+p_a <- obs |> filter(city %in% main3) |> group_by(city, month) |>
+  summarise(med = median(NO), .groups = "drop") |>
+  ggplot(aes(month, med, colour = city)) + geom_line(linewidth = 0.8) + geom_point(size = 1) +
+  scale_colour_manual(values = pal3) + scale_x_continuous(breaks = 1:12, labels = substr(month.abb, 1, 1)) +
+  labs(x = "Month", y = "Median NO (ppb)", colour = NULL) + theme(legend.position = "bottom")
+p_b <- obs |> group_by(month) |> summarise(p = mean(exc)) |>
+  ggplot(aes(month, p)) + geom_col(fill = "grey60", width = 0.7) +
+  scale_x_continuous(breaks = 1:12, labels = substr(month.abb, 1, 1)) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Month", y = "Site-months above u")
+p_a + p_b
+```
+
+### Missing data
+
+```{r}
+#| label: missing
+miss_city <- df |> group_by(city) |>
+  summarise(n = n(), across(c(NO, temp, wind, pres), ~ mean(is.na(.)))) |> ungroup()
+ros <- obs |> filter(city == "Roseville") |> mutate(tm = is.na(temp))
+ros_med <- c(obs = median(ros$NO[!ros$tm]), miss = median(ros$NO[ros$tm]))
+jc <- df |> select(NO, temp, wind, pres) |> drop_na()
+jc_exc <- sum(jc$NO > u)
+sf_exc <- sum(obs$exc[obs$city == "San Francisco"])
+```
+
+```{r}
+#| label: fig-missing
+#| fig-cap: "Share of months missing for each variable, by city and year. Most gaps are structural: a variable is never measured at a site, or measurement stops."
+#| fig-height: 3.6
+df |> group_by(city, year) |>
+  summarise(across(c(NO, temp, wind, pres), ~ mean(is.na(.))), .groups = "drop") |>
+  pivot_longer(c(NO, temp, wind, pres), names_to = "var", values_to = "miss") |>
+  mutate(var = factor(var, c("NO", "temp", "wind", "pres"),
+                      c("NO", "Temperature", "Wind speed", "Pressure"))) |>
+  ggplot(aes(year, city, fill = miss)) + geom_tile(colour = "white") +
+  facet_wrap(~ var, nrow = 1) +
+  scale_fill_gradient(low = "#EEF2F5", high = "#2C3E50", labels = scales::percent, name = "Missing") +
+  scale_x_continuous(breaks = c(2008, 2012, 2016)) +
+  labs(x = NULL, y = NULL) + theme(panel.grid = element_blank(), axis.text.x = element_text(size = 7))
+```
+
+The weather variables have many gaps: `r miss$temp` of `r n_all` months are missing for temperature, `r miss$wind` for wind speed and `r miss$pres` for pressure. @fig-missing shows that the gaps are not scattered at random. They are mostly **structural**:
+
+- San Francisco never records any weather variable, Salinas never records wind or pressure, and pressure is only measured at four sites.
+- Temperature and pressure stop at Roseville and Santa Maria in 2012.
+- 2016 is missing almost entirely, because the record ends in April.
+
+This pattern can bias any analysis that uses only complete rows. NO fell over the decade, so months with missing weather data are disproportionately recent, low-pollution months. At Roseville, for example, the median NO is `r f1(ros_med["obs"])` ppb in months with a temperature reading and `r f1(ros_med["miss"])` ppb in months without one. San Francisco is the clearest case: it has `r sf_exc` extreme months, but none of them can enter a model that needs a weather variable.
+
+The original group analysis made this worse by fitting every weather model on the rows where *all three* weather variables were present. That left `r nrow(jc)` site-months with `r jc_exc` extreme months. Here each variable is tested on all the months where it is measured, and multiple imputation is tried for temperature and wind speed (see *Season and weather*).
+
+### Weather variables
+
+```{r}
+#| label: fig-covariates
+#| fig-cap: "NO against each weather variable for the cities that record it, with a smoothed trend per city (log scale). Within cities the relationships are weak and not clearly linear."
+#| fig-height: 3.4
+cov_long <- obs |> select(city, NO, temp, wind, pres) |>
+  pivot_longer(c(temp, wind, pres), names_to = "var", values_to = "x") |> filter(!is.na(x)) |>
+  mutate(var = factor(var, c("temp", "wind", "pres"), c("Temperature", "Wind speed", "Pressure")),
+         grp = ifelse(city %in% main3, city, "Other cities"))
+ggplot(cov_long, aes(x, NO + 1, colour = grp)) +
+  geom_point(size = 0.5, alpha = 0.35) +
+  geom_smooth(aes(group = city), method = "loess", se = FALSE, linewidth = 0.6, span = 1) +
+  facet_wrap(~ var, scales = "free_x") + scale_y_log10() +
+  scale_colour_manual(values = c(pal3, "Other cities" = "grey55")) +
+  labs(x = "Value as supplied", y = "NO + 1 (ppb, log scale)", colour = NULL) +
+  theme(legend.position = "bottom")
+```
+
+@fig-covariates plots NO against each weather variable. Most of the variation is between cities: the polluted cities sit high whatever the weather. Within a city the smoothed trends are mostly flat or gently curved, with no strong linear relationship. This motivates two choices in the weather models below: every weather model includes a city effect, so that a weather variable is not credited with what are really differences between places, and any weather effect is expected to be small.
+
+## Defining an extreme month
+
+```{r}
+#| label: threshold
+qs <- quantile(obs$NO, c(0.80, 0.85, 0.90, 0.95))
+thr_tab <- tibble(Quantile = c("80th", "85th", "90th", "95th"), u = as.numeric(qs),
+                  n = sapply(qs, function(q) sum(obs$NO > q)))
+fit0 <- fevd(NO, gp_data(obs), threshold = u, type = "GP", time.units = "120/year")
+ci0  <- ci(fit0, type = "parameter")
+sig0 <- fit0$results$par["scale"]; xi0 <- fit0$results$par["shape"]
+zeta <- mean(obs$exc); n_exc <- sum(obs$exc)
+rl   <- as.numeric(return.level(fit0, return.period = c(2, 10)))
+
+# mean residual life and parameter stability, computed directly
+ugrid <- seq(20, 400, by = 5)
+mrl <- bind_rows(lapply(ugrid, function(v) {
+  e <- obs$NO[obs$NO > v] - v
+  tibble(u = v, me = mean(e), se = sd(e) / sqrt(length(e)), n = length(e))
+})) |> filter(n >= 10)
+stab <- bind_rows(lapply(seq(60, 260, by = 10), function(v) {
+  f <- fevd(NO, gp_data(obs), threshold = v, type = "GP")
+  p <- f$results$par; V <- solve(f$results$hessian)
+  # modified scale sigma* = sigma - xi * u, delta-method standard error
+  g <- c(1, -v); sstar <- p["scale"] - p["shape"] * v
+  tibble(u = v, sstar = sstar, se_s = sqrt(drop(t(g) %*% V %*% g)),
+         xi = p["shape"], se_xi = sqrt(V[2, 2]))
+}))
+
+# dependence between consecutive months at the same site
+dep <- obs |> arrange(site, year, month) |> group_by(site) |>
+  mutate(idx = (year - 2007) * 12 + month,
+         prev = lag(exc) & (idx - lag(idx) == 1)) |> ungroup()
+p_prev <- mean(dep$exc[dep$prev %in% TRUE])
+p_base <- mean(dep$exc[dep$site %in% unique(dep$site[dep$exc])])
+clus <- dep |> filter(exc) |> group_by(site) |> arrange(idx, .by_group = TRUE) |>
+  mutate(cl = cumsum(c(1, diff(idx) > 1))) |> group_by(site, cl) |>
+  summarise(NO = max(NO), size = n(), .groups = "drop")
+fit_cl <- fevd(clus$NO, threshold = u, type = "GP")
+ci_cl  <- ci(fit_cl, type = "parameter")
+# the original group model, for comparison: straight line through yearly totals
+yt <- obs |> filter(year < 2016) |> group_by(year) |> summarise(k = sum(exc))
+lm_old <- lm(k ~ year, data = yt); ci_old <- confint(lm_old)["year", ]
+```
+
+A threshold must be high enough that the GPD approximation holds above it, but low enough to leave enough exceedances to estimate the model: too low gives bias, too high gives noisy estimates. Two standard plots guide the choice (@fig-threshold). Above a valid threshold, the mean excess $\mathrm{E}(X-u \mid X>u)$ is a linear function of $u$, so the mean residual life (MRL) plot should be straight. The shape $\xi$ and the modified scale $\sigma^{*}=\sigma_u-\xi u$ should also stay constant. The MRL plot is roughly linear from about 120 ppb, and both parameters are stable from about 100 ppb, with widening intervals above 200 ppb.
+
+```{r}
+#| label: fig-threshold
+#| fig-cap: "Threshold choice. Left: mean residual life plot with 95% intervals. Right: GPD shape estimate against threshold with 95% intervals. The vertical line marks the chosen threshold, the 85th percentile."
+#| fig-height: 3
+p1 <- ggplot(mrl, aes(u, me)) +
+  geom_ribbon(aes(ymin = me - 1.96 * se, ymax = me + 1.96 * se), fill = "grey85") +
+  geom_line() + geom_vline(xintercept = u, linetype = "dashed", colour = "#B5472E") +
+  labs(x = "Threshold u (ppb)", y = "Mean excess (ppb)")
+p2 <- ggplot(stab, aes(u, xi)) +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_pointrange(aes(ymin = xi - 1.96 * se_xi, ymax = xi + 1.96 * se_xi), size = 0.2) +
+  geom_vline(xintercept = u, linetype = "dashed", colour = "#B5472E") +
+  labs(x = "Threshold u (ppb)", y = expression("Shape " * xi))
+p1 + p2
+```
+
+The threshold is set at the 85th percentile, $u =$ `r f2(u)` ppb. It sits in the stable region of both plots and leaves `r n_exc` exceedances (`r f1(100 * zeta)`% of observed site-months). The fitted GPD has scale $\hat\sigma =$ `r f1(sig0)` ppb, 95% CI `r ci_txt(ci0[1, 1], ci0[1, 3], f1)`, and shape $\hat\xi =$ `r f3(xi0)`, 95% CI `r ci_txt(ci0[2, 1], ci0[2, 3])`.
+
+The interval for $\xi$ includes zero. So the pooled data do not establish whether the tail is bounded ($\xi<0$) or decays exponentially ($\xi=0$). My original section stated $\xi\approx-0.20$ and concluded that the tail was bounded, which the uncertainty does not support. The diagnostic plots in @fig-diagnostics (left) show a good fit. With about `r 12 * 10` site-months per year, the model's 2-year and 10-year return levels are `r f1(rl[1])` and `r f1(rl[2])` ppb. These are the levels expected to be exceeded at some site about once in 2 and 10 years respectively.
+
+**Dependence.** Extreme months come in runs. Given that a site exceeded $u$ last month, it exceeds it this month with probability `r f2(p_prev)`, against `r f2(p_base)` at the same sites overall. The `r n_exc` exceedances form `r nrow(clus)` runs of consecutive months. The GPD theory assumes independent exceedances. Refitting to the largest value in each run (declustering) gives $\hat\xi =$ `r f3(fit_cl$results$par["shape"])`, CI `r ci_txt(ci_cl[2, 1], ci_cl[2, 3])`. The estimate is similar, but the interval is wider. The models below use all exceedances, so their confidence intervals should be read as somewhat too narrow.
+
+## Has extreme pollution changed over time?
+
+The original report fitted a straight line to the number of exceedances per year. That gave a slope of `r f1(coef(lm_old)[2])` exceedances per year (95% CI `r f1(ci_old[1])` to `r f1(ci_old[2])`), but it treated counts as continuous, ignored that different cities contribute, and was not an extreme value model. Here the two parts of a POT model are analysed separately: **how often** a site-month exceeds $u$, and **by how much** when it does.
+
+```{r}
+#| label: trend
+# frequency: per city and year, full years only (2016 ends in April, so a partial year would be biased to winter)
+ya <- obs |> filter(city %in% main3, year < 2016) |> group_by(city, year) |>
+  summarise(k = sum(exc), n = n(), .groups = "drop") |> mutate(yc = year - 2011)
+fq_add <- glm(cbind(k, n - k) ~ yc + city, family = quasibinomial, data = ya)
+fq_int <- glm(cbind(k, n - k) ~ yc * city, family = quasibinomial, data = ya)
+p_int  <- anova(fq_add, fq_int, test = "F")[2, "Pr(>F)"]
+city_tr <- bind_rows(lapply(main3, function(cc) {
+  m <- glm(cbind(k, n - k) ~ yc, family = quasibinomial, data = filter(ya, city == cc))
+  b <- coef(m)[2]; se <- summary(m)$coefficients[2, 2]; q <- qt(0.975, m$df.residual)
+  tibble(city = cc, or = exp(b), lo = exp(b - q * se), hi = exp(b + q * se),
+         p = summary(m)$coefficients[2, 4], disp = summary(m)$dispersion,
+         p07 = predict(m, data.frame(yc = -4), type = "response"),
+         p15 = predict(m, data.frame(yc = 4), type = "response"))
+}))
+# severity: GPD with log-scale linear in time, all exceedances
+gd <- gp_data(obs, t, s1, c1)
+fit_s  <- fevd(NO, gd, threshold = u, type = "GP", scale.fun = ~ s1 + c1, use.phi = TRUE)
+fit_t  <- fevd(NO, gd, threshold = u, type = "GP", scale.fun = ~ t, use.phi = TRUE)
+fit_ts <- fevd(NO, gd, threshold = u, type = "GP", scale.fun = ~ t + s1 + c1, use.phi = TRUE)
+ci_t   <- ci(fit_t, type = "parameter")
+p_t    <- lr.test(fit0, fit_t)$p.value
+p_ts   <- lr.test(fit_s, fit_ts)$p.value
+b_t    <- fit_t$results$par["phi1"]
+```
+
+**Frequency.** For each of the three cities where nearly all extreme months occur, the number of exceedances in each full year (2007–2015) is modelled as binomial out of the months observed, with a logistic trend in year. A quasi-binomial fit estimates the dispersion. All three dispersion estimates are below 1 (`r paste(f2(city_tr$disp), collapse = ", ")`), so the yearly counts vary no more than a binomial model allows. A Poisson model for the counts, as used in the original city comparison, was never checked and is less natural here, because a site can exceed $u$ at most 12 times a year. The trend differs between cities ($F$-test for different slopes, $p$ `r pv(p_int)`), so @tbl-trend reports one per city.
+
+```{r}
+#| label: tbl-trend
+#| tbl-cap: "Trend in the frequency of extreme months, 2007–2015. The odds ratio is the multiplicative change per year in the odds that a month exceeds u; P(exceed) is the fitted probability."
+city_tr |> transmute(City = city,
+                     `Odds ratio` = f3(or), `95% CI` = ci_txt(lo, hi),
+                     `p-value` = ifelse(p < 0.001, "< 0.001", f3(p)),
+                     `P(exceed) 2007` = f2(p07), `P(exceed) 2015` = f2(p15)) |>
+  tab("lccccc")
+```
+
+```{r}
+#| label: fig-trend
+#| fig-cap: "Left: share of observed months above u each year, with the fitted logistic trend. Right: size of every exceedance over time, coloured as on the left (grey: other cities); the line is the fitted GPD mean excess under the time-trend model, which is close to flat."
+#| fig-height: 3.2
+fitted_tr <- bind_rows(lapply(main3, function(cc) {
+  m <- glm(cbind(k, n - k) ~ yc, family = quasibinomial, data = filter(ya, city == cc))
+  tibble(city = cc, yc = seq(-4, 4, 0.1), p = predict(m, data.frame(yc = seq(-4, 4, 0.1)), type = "response"))
+}))
+q1 <- ggplot(ya, aes(yc + 2011, k / n, colour = city)) + geom_point(size = 1.4) +
+  geom_line(data = fitted_tr, aes(yc + 2011, p), linewidth = 0.8) +
+  scale_colour_manual(values = pal3) + scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(x = NULL, y = "Months above u", colour = NULL) + theme(legend.position = "bottom")
+tt <- seq(min(obs$t), max(obs$t), length.out = 100)
+p_par <- fit_t$results$par
+me_t <- exp(p_par["phi0"] + p_par["phi1"] * tt) / (1 - p_par["shape"])
+q2 <- ggplot(filter(obs, exc), aes(t + 2011, NO - u, colour = ifelse(city %in% main3, city, "Other"))) +
+  geom_point(size = 1, alpha = 0.7) +
+  geom_line(data = tibble(t = tt, me = me_t), aes(t + 2011, me), inherit.aes = FALSE, linewidth = 0.8) +
+  scale_colour_manual(values = c(pal3, Other = "grey55")) +
+  scale_x_continuous(breaks = seq(2008, 2016, 2)) +
+  labs(x = NULL, y = "Excess over u (ppb)", colour = NULL) + theme(legend.position = "none")
+q1 + q2
+```
+
+Extreme months became much rarer at Rubidoux and Roseville. At Rubidoux the fitted chance that a month exceeds $u$ fell from `r f2(city_tr$p07[1])` in 2007 to `r f2(city_tr$p15[1])` in 2015, and at Roseville from `r f2(city_tr$p07[3])` to `r f2(city_tr$p15[3])`. San Francisco shows no trend: odds ratio `r f3(city_tr$or[2])`, CI `r ci_txt(city_tr$lo[2], city_tr$hi[2])`.
+
+**Severity.** The GPD scale is allowed to change with time, $\log\sigma(t)=\phi_0+\phi_1 t$, with $t$ in years from 2011. The estimated change is $\hat\phi_1 =$ `r f3(b_t)` per year, 95% CI `r ci_txt(ci_t[2, 1], ci_t[2, 3])`, which is about `r f1(100 * (exp(b_t) - 1))`% per year. The likelihood ratio test against a constant scale gives $p$ `r pv(p_t)`, and after allowing for season $p$ `r pv(p_ts)`. There is no evidence that exceedances became smaller.
+
+**Answer to question 2.** Between 2007 and 2015, extreme NO months became less *frequent* at Rubidoux and Roseville but not at San Francisco. When an extreme month did occur, it was no less *severe* than before.
+
+## Season and weather
+
+```{r}
+#| label: weather
+exc_cities <- function(d) names(which(table(d$city[d$NO > u]) >= 10))
+fit_cov <- function(v) {
+  d <- obs |> filter(!is.na(.data[[v]]))
+  keep <- exc_cities(d)
+  d <- d |> filter(city %in% keep) |> mutate(city = factor(city))
+  dd <- gp_data(d, all_of(v), city, s1, c1)
+  a <- fevd(NO, dd, threshold = u, type = "GP", scale.fun = ~ city, use.phi = TRUE)
+  b <- fevd(NO, dd, threshold = u, type = "GP", scale.fun = as.formula(paste("~ city +", v)), use.phi = TRUE)
+  cs <- fevd(NO, dd, threshold = u, type = "GP", scale.fun = ~ city + s1 + c1, use.phi = TRUE)
+  ds <- fevd(NO, dd, threshold = u, type = "GP", scale.fun = as.formula(paste("~ city + s1 + c1 +", v)), use.phi = TRUE)
+  k <- length(b$results$par) - 1; cib <- ci(b, type = "parameter")
+  tibble(var = v, cities = paste(keep, collapse = ", "), n_exc = sum(dd$NO > u),
+         est = b$results$par[k], lo = cib[k, 1], hi = cib[k, 3],
+         p = lr.test(a, b)$p.value, p_s = lr.test(cs, ds)$p.value)
+}
+wt <- bind_rows(lapply(c("temp", "wind", "pres"), fit_cov))
+
+# season, with city, at the three cities with most exceedances
+dc <- obs |> filter(city %in% main3) |> mutate(city = factor(city, levels = main3))
+gdc <- gp_data(dc, city, s1, c1)
+fit_c  <- fevd(NO, gdc, threshold = u, type = "GP", scale.fun = ~ city, use.phi = TRUE)
+fit_cs <- fevd(NO, gdc, threshold = u, type = "GP", scale.fun = ~ city + s1 + c1, use.phi = TRUE)
+p_season <- lr.test(fit_c, fit_cs)$p.value
+pc <- fit_cs$results$par
+amp <- sqrt(pc["phi3"]^2 + pc["phi4"]^2)
+peak_month <- (atan2(pc["phi3"], pc["phi4"]) * 12 / (2 * pi)) %% 12
+peak_month <- ifelse(peak_month < 0.5, peak_month + 12, peak_month)
+
+# multiple imputation for temperature and wind (sites that measure them at least sometimes)
+imp_dat <- obs |> filter(city != "San Francisco") |>
+  mutate(city = factor(city), lNO = log1p(NO)) |> select(city, t, s1, c1, lNO, temp, wind)
+pm <- make.predictorMatrix(imp_dat); pm[, ] <- 0
+pm["temp", c("city", "t", "s1", "c1", "lNO", "wind")] <- 1
+pm["wind", c("city", "t", "s1", "c1", "lNO", "temp")] <- 1
+meth <- make.method(imp_dat); meth[c("temp", "wind")] <- "pmm"
+M <- 20
+imp <- mice(imp_dat, m = M, method = meth, predictorMatrix = pm, printFlag = FALSE)
+pool_gp <- function(v) {
+  res <- t(sapply(1:M, function(i) {
+    d <- complete(imp, i) |> mutate(NO = expm1(lNO)) |> filter(city %in% c("Rubidoux", "Roseville")) |>
+      mutate(city = droplevels(city))
+    dd <- as.data.frame(select(d, NO, city, all_of(v)))
+    f <- fevd(NO, dd, threshold = u, type = "GP", scale.fun = as.formula(paste("~ city +", v)), use.phi = TRUE)
+    c(f$results$par[3], diag(solve(f$results$hessian))[3], sum(dd$NO > u))
+  }))
+  qbar <- mean(res[, 1]); W <- mean(res[, 2]); B <- var(res[, 1]); Tt <- W + (1 + 1 / M) * B
+  r <- (1 + 1 / M) * B / W; nu <- (M - 1) * (1 + 1 / r)^2
+  tibble(var = v, est = qbar, lo = qbar - qt(0.975, nu) * sqrt(Tt), hi = qbar + qt(0.975, nu) * sqrt(Tt), n_exc = res[1, 3])
+}
+mi <- bind_rows(pool_gp("temp"), pool_gp("wind"))
+```
+
+Each weather variable enters the GPD scale on the log scale, $\log\sigma=\text{city effect}+\beta x$, using every month in which it is measured. Only cities with at least ten exceedances are included, which leaves Rubidoux and Roseville in each case. San Francisco has no weather data, and the other cities have too few extreme months. Each model is compared by a likelihood ratio test with the same model without the variable, with and without seasonal terms.
+
+```{r}
+#| label: tbl-weather
+#| tbl-cap: "Weather variables in the GPD scale, with a city effect. $\\beta$ is the change in log-scale per unit of the variable as supplied, and $\\exp(\\beta)-1$ is the percentage change in the typical size of an exceedance per unit. p is from the likelihood ratio test; p (season) repeats it with seasonal terms in both models."
+lab <- c(temp = "Temperature", wind = "Wind speed", pres = "Pressure")
+wt |> transmute(Variable = lab[var], `Exceedances` = n_exc,
+                `$\\beta$ (95% CI)` = paste(f3(est), ci_txt(lo, hi)),
+                `% change` = paste0(f1(100 * (exp(est) - 1)), "%"),
+                `p` = f3(p), `p (season)` = f3(p_s)) |>
+  tab("lccccc")
+```
+
+None of the three weather variables improves the model, with or without season (@tbl-weather). The original report described pressure as "near significant", but that came from the restricted complete-row data without a city effect. With a city effect and all months in which pressure is measured, the estimate is `r f3(wt$est[3])` per unit (CI `r ci_txt(wt$lo[3], wt$hi[3])`). That interval runs from a `r f1(abs(100 * (exp(wt$lo[3]) - 1)))`% decrease to a `r f1(100 * (exp(wt$hi[3]) - 1))`% increase in the typical size of an exceedance per unit of pressure, so the data cannot tell whether pressure has any effect on extreme pollution. For wind speed the Wald interval just excludes zero, but the likelihood ratio test, which is more reliable in samples this small, does not support an effect.
+
+**Imputation.** Temperature and wind speed were imputed 20 times by predictive mean matching (`mice`), using city, time, season, NO and the other variable, at every site that records them at least sometimes. Pooled with Rubin's rules, the temperature effect is `r f3(mi$est[1])` (CI `r ci_txt(mi$lo[1], mi$hi[1])`) and the wind effect `r f3(mi$est[2])` (CI `r ci_txt(mi$lo[2], mi$hi[2])`). These are close to the complete-data results. Imputation adds only a handful of extreme months, because most missing extreme months are in San Francisco, which never measures weather and so cannot be imputed from its own record.
+
+**Season** matters, unlike the weather variables. With a city effect for the three main cities, adding a yearly cycle ($\sin$ and $\cos$ of month) to the log-scale improves the fit, $p$ `r pv(p_season)`. The cycle peaks between `r month.name[floor(peak_month)]` and `r month.name[ifelse(ceiling(peak_month) > 12, 1, ceiling(peak_month))]`, and changes the typical exceedance size by a factor of up to `r f2(exp(amp))` above or below the average. Season is therefore the main driver found of extreme NO, both of how often extremes happen (@fig-season) and of how large they are. The supplied weather variables do not explain it.
+
+## Differences between cities
+
+```{r}
+#| label: cities
+rate_tab <- obs |> group_by(city) |>
+  summarise(n = n(), k = sum(exc), max = max(NO),
+            lo = binom.test(k, n)$conf.int[1], hi = binom.test(k, n)$conf.int[2], .groups = "drop") |>
+  arrange(desc(k / n))
+fit_c2 <- fevd(NO, gdc, threshold = u, type = "GP", scale.fun = ~ city, shape.fun = ~ city, use.phi = TRUE)
+p_city_scale <- lr.test(fevd(NO, gdc, threshold = u, type = "GP"), fit_c)$p.value
+p_city_shape <- lr.test(fit_c, fit_c2)$p.value
+ci_c <- ci(fit_c, type = "parameter")
+
+# local thresholds: each city's own 85th percentile
+dl <- obs |> group_by(city) |> mutate(u_c = unname(quantile(NO, 0.85))) |> ungroup() |>
+  mutate(city = factor(city)) |> select(NO, city, u_c) |> as.data.frame()
+loc_tab <- dl |> group_by(city) |> summarise(u_c = first(u_c), n_exc = sum(NO > u_c))
+fit_l1 <- fevd(NO, dl, threshold = dl$u_c, type = "GP", scale.fun = ~ city, use.phi = TRUE)
+fit_l2 <- fevd(NO, dl, threshold = dl$u_c, type = "GP", scale.fun = ~ city, shape.fun = ~ city, use.phi = TRUE)
+p_local_shape <- lr.test(fit_l1, fit_l2)$p.value
+ci_l <- ci(fit_l1, type = "parameter")
+xi_l <- fit_l1$results$par["shape"]
+
+# separate fits per city (as in the original report), with intervals
+sep <- bind_rows(lapply(levels(dl$city), function(cc) {
+  d <- dl[dl$city == cc, ]; uu <- d$u_c[1]
+  f <- fevd(d$NO[d$NO > uu], threshold = uu, type = "GP")
+  cc_ci <- tryCatch(ci(f, type = "parameter"), error = function(e) matrix(NA, 2, 3))
+  tibble(city = cc, xi = f$results$par["shape"], lo = cc_ci[2, 1], hi = cc_ci[2, 3])
+}))
+xi_rub <- sep$xi[sep$city == "Rubidoux"]
+```
+
+### Against a common threshold
+
+With one threshold for all cities, the question is about absolute levels: where do concentrations above `r f1(u)` ppb occur? @tbl-rates shows that the answer is almost entirely in three places. Six cities have at most three extreme months in ten years. That is a finding in its own right, not missing information: it says their NO stays well below the levels seen at Rubidoux, San Francisco and Roseville.
+
+```{r}
+#| label: tbl-rates
+#| tbl-cap: "Share of observed months above the global threshold u, with exact 95% binomial intervals."
+rate_tab |> transmute(City = city, `Months observed` = n, `Months above u` = k,
+                      `Share (95% CI)` = paste0(f2(k / n), " ", ci_txt(lo, hi, f2)),
+                      `Maximum (ppb)` = f1(max)) |>
+  tab("lcccc")
+```
+
+The original report compared Rubidoux and Roseville with a Poisson test. Here the three cities with enough exceedances are compared within one GPD, with city as a covariate in the scale: $\log\sigma=\phi_0+\phi_{\text{city}}$. Taking Rubidoux as the reference, San Francisco's exceedances are larger by a factor of `r f2(exp(fit_c$results$par["phi1"]))` (CI `r ci_txt(exp(ci_c[2, 1]), exp(ci_c[2, 3]), f2)`). Roseville's are smaller by a factor of `r f2(exp(fit_c$results$par["phi2"]))` (CI `r ci_txt(exp(ci_c[3, 1]), exp(ci_c[3, 3]), f2)`). The city effect is clear ($p$ `r pv(p_city_scale)`). Letting the shape also differ by city does not improve the fit ($p$ `r pv(p_city_shape)`).
+
+With a common shape and a city-specific scale, $\hat\xi =$ `r f3(fit_c$results$par["shape"])`, CI `r ci_txt(ci_c[4, 1], ci_c[4, 3])`. Once the different scales of the three cities are allowed for, the interval excludes zero, so at these cities the tail above `r f1(u)` ppb is bounded. Pooling cities with different scales, as in the single fit used to define extremes, mixes them together and makes the tail look heavier than it is at any one city.
+
+### Against each city's own threshold
+
+```{r}
+#| label: fig-mrl-city
+#| fig-cap: "Mean residual life plot for each city, with 95% intervals. The dashed line is the city's 85th percentile, used as its local threshold."
+#| fig-height: 5
+mrl_c <- bind_rows(lapply(levels(dl$city), function(cc) {
+  x <- dl$NO[dl$city == cc]
+  g <- seq(quantile(x, 0.5), quantile(x, 0.95), length.out = 40)
+  bind_rows(lapply(g, function(v) { e <- x[x > v] - v
+    tibble(city = cc, u = v, me = mean(e), se = sd(e) / sqrt(length(e)), n = length(e)) }))
+})) |> filter(n >= 5)
+ggplot(mrl_c, aes(u, me)) +
+  geom_ribbon(aes(ymin = me - 1.96 * se, ymax = me + 1.96 * se), fill = "grey85") +
+  geom_line() + geom_vline(data = loc_tab, aes(xintercept = u_c), linetype = "dashed", colour = "#B5472E") +
+  facet_wrap(~ city, scales = "free") + labs(x = "Threshold (ppb)", y = "Mean excess (ppb)")
+```
+
+A local threshold asks a different question: when is a month extreme *for that city*? Each city's 85th percentile ranges from `r f1(min(loc_tab$u_c))` ppb to `r f1(max(loc_tab$u_c))` ppb and leaves 15 to 17 exceedances per city (33 for Lompoc, which has two sites). The marker asked for evidence that the 85th percentile suits each city. @fig-mrl-city shows the city MRL plots. Most are roughly linear around their threshold, but with so few points per city the intervals are wide, and the plots cannot pin the threshold down precisely.
+
+My original section fitted a separate GPD to each city and reported that Alpine and Gaviota have unbounded tails while Rubidoux and Roseville have bounded ones. With intervals added, that claim does not hold. Every other city's 95% interval for $\xi$ includes zero, and the Rubidoux fit ($\hat\xi =$ `r f2(xi_rub)`) breaks down, because the GPD estimates become unreliable when $\xi<-1$. A single model with a city-specific scale and a common shape fits as well as one with nine separate shapes ($p$ `r pv(p_local_shape)`). Its shape is $\hat\xi =$ `r f3(xi_l)`, CI `r ci_txt(ci_l[nrow(ci_l), 1], ci_l[nrow(ci_l), 3])`.
+
+**Answer to question 4.** The cities differ enormously in the *level* of their extremes: how often they pass a common threshold, and the scale of their exceedances. There is no evidence that the *shape* of their tails differs.
+
+### Spatial dependence
+
+```{r}
+#| label: spatial
+sites <- df |> distinct(site, lat, long)
+res <- obs |> mutate(l = log1p(NO)) |> group_by(site, month) |> mutate(r = l - mean(l)) |> ungroup() |>
+  mutate(tm = (year - 2007) * 12 + month) |> select(site, tm, r) |> pivot_wider(names_from = site, values_from = r)
+C <- cor(res[, -1], use = "pairwise.complete.obs")
+hav <- function(a, b) { p <- pi / 180; h <- sin((b$lat - a$lat) * p / 2)^2 +
+  cos(a$lat * p) * cos(b$lat * p) * sin((b$long - a$long) * p / 2)^2; 2 * 6371 * asin(sqrt(h)) }
+pr <- t(combn(colnames(C), 2))
+sp <- tibble(a = pr[, 1], b = pr[, 2]) |> rowwise() |>
+  mutate(r = C[a, b], km = hav(sites[sites$site == a, ], sites[sites$site == b, ])) |> ungroup()
+sp_test <- suppressWarnings(cor.test(sp$r, sp$km, method = "spearman"))
+```
+
+The original group code mapped site means and found no geographical pattern beyond the urban sites being higher. As a direct check, monthly log-NO at each site was deseasonalised, and the correlation between every pair of sites was compared with the distance between them. Correlations are weak (median `r f2(median(sp$r))`) and unrelated to distance (Spearman $\rho =$ `r f2(sp_test$estimate)`, $p =$ `r f3(sp_test$p.value)`). So there is no evidence of spatial dependence that the models above need to account for.
+
+## Model checks
+
+```{r}
+#| label: fig-diagnostics
+#| fig-cap: "Quantile plots for three GPD models, after transforming each exceedance to a standard exponential scale using its own fitted parameters. The grey band is a pointwise 95% range for a correct model. Left: pooled model used to define extremes. Centre: common threshold with city-specific scale. Right: local thresholds with city-specific scale and common shape."
+#| fig-height: 2.9
+std_exp <- function(x, uu, sig, xi) {
+  xi <- unname(xi); sig <- unname(sig)
+  if (abs(xi) < 1e-8) (x - uu) / sig else log1p(xi * (x - uu) / sig) / xi
+}
+qq_df <- function(e, lab) { e <- sort(e); n <- length(e); i <- 1:n
+  # pointwise 95% band for exponential order statistics, from Beta(i, n - i + 1) uniform order statistics
+  tibble(model = lab, emp = e, theo = -log(1 - i / (n + 1)),
+         lo = -log(1 - qbeta(0.025, i, n - i + 1)), hi = -log(1 - qbeta(0.975, i, n - i + 1))) }
+e0 <- std_exp(obs$NO[obs$exc], u, sig0, xi0)
+pc1 <- fit_c$results$par; dcx <- dc |> filter(exc)
+sig_c <- exp(pc1["phi0"] + ifelse(dcx$city == "San Francisco", pc1["phi1"], 0) + ifelse(dcx$city == "Roseville", pc1["phi2"], 0))
+e1 <- std_exp(dcx$NO, u, sig_c, pc1["shape"])
+pl <- fit_l1$results$par; dlx <- dl[dl$NO > dl$u_c, ]
+lev <- levels(dl$city); X <- model.matrix(~ city, data.frame(city = factor(dlx$city, levels = lev)))
+sig_l <- exp(drop(X %*% pl[grep("phi", names(pl))]))
+e2 <- std_exp(dlx$NO, dlx$u_c, sig_l, pl["shape"])
+qq_all <- bind_rows(qq_df(e0, "Pooled, common u"), qq_df(e1, "City scale, common u"), qq_df(e2, "City scale, local u"))
+out_band <- qq_all |> group_by(model) |> summarise(n = n(), out = sum(emp < lo | emp > hi))
+ob <- setNames(out_band$out, out_band$model); nb <- setNames(out_band$n, out_band$model)
+qq_txt <- paste0("Almost every point lies inside the 95% band: ", ob["Pooled, common u"], " of ", nb["Pooled, common u"],
+                 " exceedances fall outside it for the pooled model, ", ob["City scale, common u"], " of ", nb["City scale, common u"],
+                 " for the city-scale model at the common threshold and ", ob["City scale, local u"], " of ", nb["City scale, local u"],
+                 " for the local-threshold model. The largest few values sit above the line in each panel, so the models may slightly understate the very highest months, but not beyond what chance allows.")
+qq_all |>
+  mutate(model = factor(model, c("Pooled, common u", "City scale, common u", "City scale, local u"))) |>
+  ggplot(aes(theo, emp)) + geom_ribbon(aes(ymin = lo, ymax = hi), fill = "grey88") +
+  geom_abline(colour = "#B5472E") + geom_point(size = 0.8) +
+  facet_wrap(~ model, nrow = 1) + labs(x = "Exponential quantile", y = "Transformed exceedance")
+```
+
+The original report showed no diagnostics for its GPD fits. @fig-diagnostics checks the three main models on a common scale. Each exceedance is transformed with its own fitted scale and shape, so that a correct model gives standard exponential values. `r qq_txt`
+
+## Discussion
+
+**Two definitions of an extreme.** This report uses two definitions, and they answer different questions.
+
+- **A common threshold** is an absolute definition. It is the relevant one for exposure and regulation: a month above `r f1(u)` ppb is a high-pollution month wherever it occurs. Under it, extremes are concentrated in three cities. The other six rarely or never reach that level, which shows that they are cleaner, not that their data are deficient.
+- **A local threshold** is relative. It asks whether a city is having an unusually bad month by its own standards, which can matter for local warnings even in a clean city. Under it, every city has extremes by construction, and the comparison is about their *shape*.
+
+The two views agree on the main point. Cities differ in the level of their extremes, not detectably in the shape of their tails.
+
+**Conclusions.**
+
+- An 85th-percentile threshold of `r f1(u)` ppb is supported by the MRL and stability plots.
+- Pooled across sites, the shape of the tail cannot be distinguished from zero. Once the different scales of the three polluted cities are allowed for, their tail is bounded.
+- Extreme months became markedly less frequent at Rubidoux and Roseville between 2007 and 2015, and did not change at San Francisco. Their severity showed no change over time.
+- Season is the clearest driver of both the frequency and the size of extremes. The supplied temperature, wind and pressure variables add nothing once city and season are accounted for, and multiple imputation does not change this.
+- Cities differ strongly in the level of their extremes. With about 16 exceedances per city, there is no evidence that their tail shapes differ.
+
+**Limitations.**
+
+- **Dependence.** Exceedances cluster in consecutive months. The models treat them as independent, so their confidence intervals are somewhat too narrow. The declustered fit gives similar estimates with wider intervals.
+- **Missing data.** The weather analysis rests on two cities, because San Francisco, the city with the largest exceedances, records no weather at all. Imputation cannot recover a variable a site never measures.
+- **Data size.** City-level models at local thresholds have about 16 exceedances each, which is enough to estimate a scale but not a separate shape for each city.
+- **Covariate units.** The units of the weather variables are undocumented and their seasonal patterns are unusual, so their estimated effects are per unit as supplied.
+- **Pooling.** One threshold is shared across sites with very different levels. The city comparison handles this with city effects, but the pooled fit used to define extremes averages over these differences.
+
+**Further work.** A natural next step is a point-process model with a site-specific threshold, which would model frequency and size together. Declustering within each site, and linking extreme months to wildfire records, would also help.
+
+## References
+
+EPA (2023). *NAAQS Table*. United States Environmental Protection Agency. <https://www.epa.gov/criteria-air-pollutants/naaqs-table>.
+
+Coles, S. (2001). *An Introduction to Statistical Modeling of Extreme Values*. Springer.
+
+Gilleland, E. and Katz, R. W. (2016). extRemes 2.0: An extreme value analysis package in R. *Journal of Statistical Software*, 72(8), 1–39. <https://doi.org/10.18637/jss.v072.i08>.
+
+Perring, M. P. et al. (2026). Nitric oxide (NO) and nitrogen dioxide (NO~2~): A state-of-knowledge review of their roles in, and consequences for, vegetation and ecosystems. *Atmospheric Environment*, 367. <https://doi.org/10.1016/j.atmosenv.2025.121744>.
+
+van Buuren, S. and Groothuis-Oudshoorn, K. (2011). mice: Multivariate imputation by chained equations in R. *Journal of Statistical Software*, 45(3), 1–67. <https://doi.org/10.18637/jss.v045.i03>.

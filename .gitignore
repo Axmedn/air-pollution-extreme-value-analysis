@@ -3,3 +3,8 @@
 .RData
 plots/
 *_files/
+!report_files/
+.quarto/
+*.log
+*.tex
+report.pdf
